@@ -1,0 +1,93 @@
+name: Deploy Borneo Bird Guide
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/deploy.yml
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download bird guide
+        env:
+          ORIGIN: https://pauline-borneo-bird-guide.panglin-id.chatgpt.site
+        run: |
+          set -euo pipefail
+          mkdir -p site
+
+          fetch() {
+            path="$1"
+            mkdir -p "site/$(dirname "$path")"
+            curl --fail --location --retry 5 --retry-all-errors \
+              --user-agent "Mozilla/5.0 GitHubActions BirdGuideMirror" \
+              "$ORIGIN/$path" -o "site/$path"
+          }
+
+          for path in index.html styles.css app.js data.json pinyin.json comparisons.json icon.svg manifest.webmanifest sw.js; do
+            fetch "$path"
+          done
+
+          node <<'NODE'
+          const fs = require("fs");
+          const data = JSON.parse(fs.readFileSync("site/data.json"));
+          const comparisons = JSON.parse(fs.readFileSync("site/comparisons.json"));
+          const paths = new Set();
+
+          function collect(value) {
+            if (typeof value === "string" && value.startsWith("assets/")) {
+              paths.add(value);
+            } else if (Array.isArray(value)) {
+              value.forEach(collect);
+            } else if (value && typeof value === "object") {
+              Object.values(value).forEach(collect);
+            }
+          }
+
+          collect(data);
+          collect(comparisons);
+
+          const birds = [...(data.birds || []), ...(data.complete || [])];
+          for (const bird of birds) {
+            if (!bird.id) continue;
+            paths.add(`assets/birds-thumb/${bird.id}.webp`);
+            paths.add(`assets/birds-detail/${bird.id}.webp`);
+          }
+
+          fs.writeFileSync("/tmp/assets.txt", [...paths].sort().join("\n"));
+          NODE
+
+          while IFS= read -r path; do
+            [ -z "$path" ] || fetch "$path"
+          done < /tmp/assets.txt
+
+          touch site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
